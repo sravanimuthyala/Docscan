@@ -2,141 +2,120 @@ import cv from "@techstark/opencv-js";
 
 /**
  * ScanDocument
- * HARDENED version: Specifically handles high-contrast backgrounds (rugs) 
- * and shadows using the reference structure.
+ * Perspective-corrects document to A4 ratio. 
+ * Includes null-safe cleanup to prevent ReferenceErrors.
  */
 export function ScanDocument(inputCanvas, outputCanvas) {
-  const src = cv.imread(inputCanvas);
-  
-  // 1. DOWNSCALE: Reference code often fails on high-res images because of 'noise'.
-  // Shrinking the image allows us to find the 'big' paper shape more reliably.
-  let ratio = src.rows / 500;
-  let dsize = new cv.Size(Math.round(src.cols / ratio), 500);
-  let resized = new cv.Mat();
-  cv.resize(src, resized, dsize, 0, 0, cv.INTER_AREA);
+  // 1. Declare all variables as null so they exist in scope for cleanup
+  let src = null, original = null, gray = null, blurred = null, thresh = null;
+  let edges = null, contours = null, hierarchy = null, kernel = null;
+  let page = null, srcTri = null, dstTri = null, M = null, warped = null;
 
-  const gray = new cv.Mat();
-  const blurred = new cv.Mat();
-  const thresh = new cv.Mat();
-  const morphed = new cv.Mat();
+  try {
+    src = cv.imread(inputCanvas);
+    original = src.clone();
+    gray = new cv.Mat();
+    blurred = new cv.Mat();
+    thresh = new cv.Mat();
 
-  // 2. PRE-PROCESS: Use Bilateral instead of Gaussian to keep edges sharp
-  cv.cvtColor(resized, gray, cv.COLOR_RGBA2GRAY);
-  cv.bilateralFilter(gray, blurred, 9, 75, 75, cv.BORDER_DEFAULT);
+    // Preprocessing
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    cv.adaptiveThreshold(blurred, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2);
 
-  // 3. ADAPTIVE THRESHOLD: This replaces Canny. 
-  // It handles local lighting (the shadows in your image) perfectly.
-  cv.adaptiveThreshold(blurred, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 11, 2);
+    // Edge Detection
+    edges = new cv.Mat();
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+    cv.morphologyEx(thresh, thresh, cv.MORPH_CLOSE, kernel);
+    cv.Canny(thresh, edges, 75, 200);
 
-  // 4. MORPHOLOGY: Closes gaps in the paper border and mutes the rug pattern.
-  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
-  cv.morphologyEx(thresh, morphed, cv.MORPH_CLOSE, kernel);
-  cv.bitwise_not(morphed, morphed); // Paper becomes WHITE object on BLACK background
+    // Find Contours
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+    cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
-  const contours = new cv.MatVector();
-  const hierarchy = new cv.Mat();
-  cv.findContours(morphed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    let maxArea = 0;
+    const imageArea = src.rows * src.cols;
 
-  // 5. FIND THE BIGGEST QUADRILATERAL
-  let docContour = null;
-  let contourList = [];
-  for (let i = 0; i < contours.size(); i++) {
-    contourList.push(contours.get(i));
-  }
-  // Sort by area so the paper is checked first
-  contourList.sort((a, b) => cv.contourArea(b) - cv.contourArea(a));
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      if (area < imageArea * 0.15) continue; // Ignore noise
 
-  for (let i = 0; i < Math.min(contourList.length, 5); i++) {
-    const cnt = contourList[i];
-    const area = cv.contourArea(cnt);
-    if (area < (resized.cols * resized.rows * 0.10)) continue;
+      const peri = cv.arcLength(cnt, true);
+      const approx = new cv.Mat();
+      cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
 
-    const peri = cv.arcLength(cnt, true);
-    const approx = new cv.Mat();
-    cv.approxPolyDP(cnt, approx, 0.03 * peri, true);
-
-    if (approx.rows === 4) {
-      docContour = approx;
-      break; 
-    } else {
-      approx.delete();
+      if (approx.rows === 4 && area > maxArea) {
+        if (page) page.delete(); // Delete previous best
+        page = approx;
+        maxArea = area;
+      } else {
+        approx.delete();
+      }
     }
-  }
 
-  // 6. ROBUST FALLBACK (Your Internship Requirement)
-  let isWarning = false;
-  if (!docContour && contourList.length > 0) {
-    isWarning = true;
-    const rect = cv.boundingRect(contourList[0]);
-    docContour = cv.matFromArray(4, 1, cv.CV_32SC2, [
-      rect.x, rect.y,
-      rect.x + rect.width, rect.y,
-      rect.x + rect.width, rect.y + rect.height,
-      rect.x, rect.y + rect.height
-    ]);
-  }
+    // 2. FAIL-SAFE: If no 4-point polygon found, show original and exit
+    if (!page) {
+      cv.imshow(outputCanvas, original);
+      return { warning: true };
+    }
 
-  if (!docContour) {
-    cv.imshow(outputCanvas, src);
-    cleanup();
+    // 3. Transformation Logic
+    const pts = [];
+    const data = page.data32S || page.data32F;
+    for (let i = 0; i < 4; i++) {
+      pts.push({ x: data[i * 2], y: data[i * 2 + 1] });
+    }
+
+    const [tl, tr, br, bl] = orderCorners(pts);
+    const width = Math.max(distance(br, bl), distance(tr, tl));
+    const height = width * 1.414; // Standard A4 ratio
+
+    srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]);
+    dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, width, 0, width, height, 0, height]);
+    
+    M = cv.getPerspectiveTransform(srcTri, dstTri);
+    warped = new cv.Mat();
+    cv.warpPerspective(original, warped, M, new cv.Size(width, height));
+
+    cv.imshow(outputCanvas, warped);
+    return { warning: false };
+
+  } catch (err) {
+    console.error("OpenCV Logic Error:", err);
     return { warning: true };
-  }
-
-  // 7. ORDER POINTS & SCALE UP
-  // We must multiply coordinates by 'ratio' to warp the ORIGINAL high-res image.
-  const data = docContour.data32F?.length ? docContour.data32F : docContour.data32S;
-  const pts = [];
-  for (let i = 0; i < 4; i++) {
-    pts.push({ 
-      x: data[i * 2] * ratio, 
-      y: data[i * 2 + 1] * ratio 
-    });
-  }
-  const { topLeft, topRight, bottomRight, bottomLeft } = orderPoints(pts);
-
-  // 8. PERSPECTIVE TRANSFORM (A4-ish fixed size for quality)
-  const maxWidth = Math.max(distance(topLeft, topRight), distance(bottomLeft, bottomRight));
-  const maxHeight = Math.max(distance(topLeft, bottomLeft), distance(topRight, bottomRight));
-
-  const srcPoints = cv.matFromArray(4, 1, cv.CV_32FC2, [
-    topLeft.x, topLeft.y, topRight.x, topRight.y,
-    bottomRight.x, bottomRight.y, bottomLeft.x, bottomLeft.y,
-  ]);
-  const dstPoints = cv.matFromArray(4, 1, cv.CV_32FC2, [
-    0, 0, maxWidth, 0, maxWidth, maxHeight, 0, maxHeight,
-  ]);
-
-  const M = cv.getPerspectiveTransform(srcPoints, dstPoints);
-  const warped = new cv.Mat();
-  cv.warpPerspective(src, warped, M, new cv.Size(maxWidth, maxHeight));
-
-  // Output result
-  cv.imshow(outputCanvas, warped);
-
-  cleanup();
-  if (M) M.delete(); if (warped) warped.delete();
-  if (srcPoints) srcPoints.delete(); if (dstPoints) dstPoints.delete();
-  return { warning: isWarning };
-
-  function cleanup() {
-    src.delete(); resized.delete(); gray.delete(); blurred.delete();
-    thresh.delete(); morphed.delete(); contours.delete(); hierarchy.delete();
-    kernel.delete(); if (docContour) docContour.delete();
+  } finally {
+    // 4. NULL-SAFE CLEANUP: Check if initialized before deleting
+    if (src) src.delete();
+    if (original) original.delete();
+    if (gray) gray.delete();
+    if (blurred) blurred.delete();
+    if (thresh) thresh.delete();
+    if (edges) edges.delete();
+    if (contours) contours.delete();
+    if (hierarchy) hierarchy.delete();
+    if (kernel) kernel.delete();
+    if (page) page.delete();
+    if (srcTri) srcTri.delete();
+    if (dstTri) dstTri.delete();
+    if (M) M.delete();
+    if (warped) warped.delete();
   }
 }
 
-// Helpers from your reference
-function orderPoints(points) {
-  const sorted = [...points].sort((a, b) => (a.x + a.y) - (b.x + b.y));
-  const diff = [...points].sort((a, b) => (a.y - a.x) - (b.y - b.x));
-  return { 
-    topLeft: sorted[0], 
-    bottomRight: sorted[3], 
-    topRight: diff[0], 
-    bottomLeft: diff[3] 
-  };
+// Helpers for coordinate sorting
+function orderCorners(pts) {
+  const rect = new Array(4);
+  const sum = pts.map(p => p.x + p.y);
+  const diff = pts.map(p => p.x - p.y);
+  rect[0] = pts[sum.indexOf(Math.min(...sum))]; // Top-Left
+  rect[2] = pts[sum.indexOf(Math.max(...sum))]; // Bottom-Right
+  rect[1] = pts[diff.indexOf(Math.min(...diff))]; // Top-Right
+  rect[3] = pts[diff.indexOf(Math.max(...diff))]; // Bottom-Left
+  return rect;
 }
 
 function distance(p1, p2) {
-  return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+  return Math.hypot(p1.x - p2.x, p1.y - p2.y);
 }

@@ -12,15 +12,11 @@ export default function UploadZone() {
   const [warning, setWarning] = useState(false);
   const [cvReady, setCvReady] = useState(false);
 
-  // ✅ REQUIRED CANVAS REFS
   const originalCanvasRef = useRef(null);
   const scannedCanvasRef = useRef(null);
 
   useEffect(() => {
-    if (cv && cv.Mat) {
-      console.log("✅ OpenCV.js ready (techstark)");
-      setCvReady(true);
-    }
+    if (cv && cv.Mat) setCvReady(true);
   }, []);
 
   async function handleFile(e) {
@@ -31,83 +27,78 @@ export default function UploadZone() {
     setWarning(false);
 
     try {
-      let canvas;
+      let sourceCanvas;
 
-      // 1️⃣ PDF → Canvas
+      // 1. Convert Input (PDF/Image) to Canvas
       if (file.type === "application/pdf") {
-        canvas = await PdfToImage(file);
-      } 
-      // 2️⃣ Image → Canvas
-      else {
+        sourceCanvas = await PdfToImage(file);
+      } else {
         const img = new Image();
-        img.src = URL.createObjectURL(file);
+        const url = URL.createObjectURL(file);
+        img.src = url;
         await img.decode();
-
-        canvas = document.createElement("canvas");
-        canvas.width = img.width;
-        canvas.height = img.height;
-        canvas.getContext("2d").drawImage(img, 0, 0);
+        
+        sourceCanvas = document.createElement("canvas");
+        sourceCanvas.width = img.width;
+        sourceCanvas.height = img.height;
+        sourceCanvas.getContext("2d").drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
       }
 
-      // 3️⃣ Draw into ORIGINAL canvas
+      // 2. Prepare Original Canvas for OpenCV
       const originalCanvas = originalCanvasRef.current;
-      originalCanvas.width = canvas.width;
-      originalCanvas.height = canvas.height;
-      originalCanvas.getContext("2d").drawImage(canvas, 0, 0);
+      originalCanvas.width = sourceCanvas.width;
+      originalCanvas.height = sourceCanvas.height;
+      originalCanvas.getContext("2d").drawImage(sourceCanvas, 0, 0);
 
-      setBefore(originalCanvas.toDataURL());
+      // Set the "Before" preview image
+      setBefore(originalCanvas.toDataURL("image/jpeg", 0.8));
 
-      // 4️⃣ Scan
-      const result = ScanDocument(
-        originalCanvasRef.current,
-        scannedCanvasRef.current
-      );
-
-      setAfter(scannedCanvasRef.current.toDataURL());
+      // 3. Run the Scanner Logic
+      const result = ScanDocument(originalCanvas, scannedCanvasRef.current);
+      
+      // Set the "After" preview image and any warnings
+      setAfter(scannedCanvasRef.current.toDataURL("image/jpeg", 0.8));
       setWarning(result.warning);
 
     } catch (err) {
-      console.error(err);
-      alert("Failed to process file");
+      console.error("Upload Error:", err);
+      alert("Failed to process file.");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <>
-      {loading && <Loader text="Scanning document..." />}
-
-      <div className="mb-3 text-start">
-        <label className="form-label fw-semibold mb-3">
-          Upload Image or PDF
-        </label>
-        <input
-          type="file"
-          className="form-control"
-          accept="image/*,application/pdf"
-          onChange={handleFile}
-          disabled={!cvReady}
+    <div className="card shadow-sm p-4">
+      {loading && <Loader text="Analyzing document..." />}
+      
+      <div className="mb-4">
+        <label className="form-label fw-bold">Upload Document (PDF or Image)</label>
+        <input 
+          type="file" 
+          className="form-control" 
+          onChange={handleFile} 
+          disabled={!cvReady || loading} 
         />
+        {!cvReady && <div className="text-muted small mt-2 italic">Waiting for Computer Vision engine...</div>}
       </div>
 
-      {!cvReady && (
-        <div className="alert alert-info">
-          Initializing OpenCV.js… please wait
-        </div>
-      )}
-
       {warning && (
-        <div className="alert alert-warning">
-          Could not confidently detect document edges. Showing best guess.
+        <div className="alert alert-warning py-2 mb-4">
+          <strong>Notice:</strong> Edge detection failed. Displaying original image.
         </div>
       )}
 
-      {/* ✅ HIDDEN CANVASES (REQUIRED FOR OPENCV) */}
-      <canvas ref={originalCanvasRef} className="d-none" />
-      <canvas ref={scannedCanvasRef} className="d-none" />
+      {/* Hidden processing canvases */}
+      <canvas ref={originalCanvasRef} style={{ display: "none" }} />
+      <canvas ref={scannedCanvasRef} style={{ display: "none" }} />
 
-      <BeforeAfter before={before} after={after} />
-    </>
+      {before && after && (
+        <div className="mt-2">
+          <BeforeAfter before={before} after={after} />
+        </div>
+      )}
+    </div>
   );
 }
