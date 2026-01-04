@@ -16,7 +16,7 @@ export default function BeforeAfter({ before, after }) {
         </div>
 
         <div className="col-md-6 text-center">
-          <p className="fw-semibold mb-2">Scanned</p>
+          <p className="fw-semibold mb-2">Processed</p>
           <img
             src={after}
             className="img-fluid rounded shadow-sm"
