@@ -5,25 +5,40 @@ import { ScanDocument } from "../utils/ScanDocument";
 import BeforeAfter from "./BeforeAfter";
 import Loader from "./Loader";
 import { useAuth } from "../auth/AuthProvider";
+
 import { db, storage } from "../firebase";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
-import { ref, uploadString, getDownloadURL } from "firebase/storage";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+
+/* ----------------------------------
+   Helper: Canvas → Blob
+---------------------------------- */
+function canvasToBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("Canvas to Blob conversion failed"));
+    }, "image/jpeg", 0.95);
+  });
+}
 
 export default function UploadZone() {
   const { user, loading: authLoading } = useAuth();
+
   const [before, setBefore] = useState(null);
   const [after, setAfter] = useState(null);
   const [fileName, setFileName] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [warning, setWarning] = useState(false);
+  const [error, setError] = useState(null); 
+  const [warning, setWarning] = useState(false); // ✅ Tracks detection failure
   const [cvReady, setCvReady] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [dragActive, setDragActive] = useState(false);
 
   const originalCanvasRef = useRef(null);
   const scannedCanvasRef = useRef(null);
-  const fileInputRef = useRef(null); // Ref to trigger hidden input
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     if (cv && cv.Mat) {
@@ -34,13 +49,10 @@ export default function UploadZone() {
   }, []);
 
   async function processFile(file) {
-    if (!file) return;
-    if (!user) {
-      alert("Please login to upload.");
-      return;
-    }
+    if (!file || !user) return;
 
     setLoading(true);
+    setError(null);
     setWarning(false);
     setUploadSuccess(false);
     setBefore(null);
@@ -49,6 +61,7 @@ export default function UploadZone() {
 
     try {
       let sourceCanvas;
+
       if (file.type === "application/pdf") {
         sourceCanvas = await PdfToImage(file);
       } else {
@@ -56,6 +69,7 @@ export default function UploadZone() {
         const url = URL.createObjectURL(file);
         img.src = url;
         await img.decode();
+
         sourceCanvas = document.createElement("canvas");
         sourceCanvas.width = img.width;
         sourceCanvas.height = img.height;
@@ -68,64 +82,63 @@ export default function UploadZone() {
       originalCanvas.height = sourceCanvas.height;
       originalCanvas.getContext("2d").drawImage(sourceCanvas, 0, 0);
 
-      const beforeData = originalCanvas.toDataURL("image/jpeg", 0.85);
-      setBefore(beforeData);
+      setBefore(originalCanvas.toDataURL("image/jpeg", 0.85));
 
-      setTimeout(async () => {
+      // Process with OpenCV
+      setTimeout(() => {
         try {
-          const result = ScanDocument(originalCanvas, scannedCanvasRef.current);
-          const afterData = scannedCanvasRef.current.toDataURL("image/jpeg", 0.9);
-          setAfter(afterData);
-          setWarning(result.warning);
-        } catch {
-          setAfter(beforeData);
+          // ScanDocument should return { warning: boolean }
+          const result = ScanDocument(
+            originalCanvas,
+            scannedCanvasRef.current
+          );
+
+          if (result.warning) {
+            // ✅ FAIL-SAFE: If detection failed, use original image as "after"
+            setAfter(originalCanvas.toDataURL("image/jpeg", 0.85));
+            setWarning(true);
+          } else {
+            setAfter(scannedCanvasRef.current.toDataURL("image/jpeg", 0.9));
+            setWarning(false);
+          }
+        } catch (err) {
+          // ✅ HARD FALLBACK: If code crashes, show original and warn
+          setAfter(originalCanvas.toDataURL("image/jpeg", 0.85));
           setWarning(true);
         } finally {
           setLoading(false);
         }
       }, 100);
-    } catch {
+    } catch (err) {
+      setError("Failed to process file.");
       setLoading(false);
     }
   }
 
-  function handleFile(e) {
-    const file = e.target.files[0];
-    processFile(file);
-  }
-
-  function handleDrop(e) {
-    e.preventDefault();
-    setDragActive(false);
-    const file = e.dataTransfer.files[0];
-    processFile(file);
-  }
-
-  function handleDragOver(e) {
-    e.preventDefault();
-    setDragActive(true);
-  }
-
-  function handleDragLeave() {
-    setDragActive(false);
-  }
-
   async function handleGalleryUpload() {
-    if (!user || !after || !before) return;
+    if (!user || !before || !after) return;
     setSaving(true);
+    setError(null);
+
     try {
       const timestamp = Date.now();
       const baseName = fileName.replace(/\.[^/.]+$/, "");
+      const originalBlob = await canvasToBlob(originalCanvasRef.current);
+      
+      // Use the scanned canvas if no warning, otherwise use original canvas for "after"
+      const afterCanvas = warning ? originalCanvasRef.current : scannedCanvasRef.current;
+      const scannedBlob = await canvasToBlob(afterCanvas);
 
       const originalPath = `scans/${user.uid}/${timestamp}_original_${baseName}.jpg`;
       const scannedPath = `scans/${user.uid}/${timestamp}_scanned_${baseName}.jpg`;
 
       const originalRef = ref(storage, originalPath);
-      await uploadString(originalRef, before, "data_url");
-      const originalURL = await getDownloadURL(originalRef);
-
       const scannedRef = ref(storage, scannedPath);
-      await uploadString(scannedRef, after, "data_url");
+
+      await uploadBytes(originalRef, originalBlob);
+      await uploadBytes(scannedRef, scannedBlob);
+
+      const originalURL = await getDownloadURL(originalRef);
       const scannedURL = await getDownloadURL(scannedRef);
 
       await addDoc(collection(db, "scans"), {
@@ -135,84 +148,65 @@ export default function UploadZone() {
         scannedUrl: scannedURL,
         originalPath,
         scannedPath,
+        isAutoProcessed: !warning, // ✅ Log if it was auto-cropped or not
         createdAt: serverTimestamp()
       });
 
       setUploadSuccess(true);
     } catch (err) {
-      console.error("Save Error:", err);
-      alert("Failed to save.");
+      setError("Upload failed. Retry?");
     } finally {
       setSaving(false);
     }
   }
 
-  if (authLoading) return <Loader text="Checking authentication..." />;
-
   return (
     <div className="card shadow-sm p-4 border-0 rounded-3 bg-white">
-      {(loading || saving) && (
-        <div className="d-flex flex-column align-items-center justify-content-center py-4">
-          <div className="spinner-border text-dark mb-3"></div>
-          <p className="fw-semibold text-muted">
-            {saving ? "Saving both versions..." : "Scanning..."}
-          </p>
+      {(loading || saving) && <Loader text={saving ? "Uploading..." : "Scanning..."} />}
+
+      {/* Fail-Safe Warning Display */}
+      {warning && (
+        <div className="alert alert-warning d-flex align-items-center mb-3 py-2 border-0 small" role="alert">
+          <span className="me-2">⚠️</span>
+          <div>
+            <strong>Detection Uncertain:</strong> We couldn't find document edges. Showing original image instead.
+          </div>
         </div>
       )}
 
-      {/* Improved Drag-and-drop zone (single interactive container) */}
-      <div
-        className={`mb-4 p-5 rounded-3 text-center border-2 ${
-          dragActive ? "border-dark bg-light" : "border-secondary-subtle"
-        }`}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        onClick={() => fileInputRef.current.click()} // Trigger the hidden input
-        style={{ 
-          transition: "all 0.2s ease", 
-          cursor: "pointer", 
-          borderStyle: "dashed" 
-        }}
-      >
-        <div className="d-flex flex-column align-items-center justify-content-center py-2">
-          <i className={`bi bi-cloud-arrow-up fs-1 mb-3 ${dragActive ? "text-dark" : "text-muted"}`}></i>
-          <h5 className="fw-bold mb-1">Upload Document</h5>
-          <p className="text-muted small">Drag & drop a file here, or click to choose manually</p>
-
-          {/* Hidden standard input */}
-          <input
-            type="file"
-            ref={fileInputRef}
-            className="d-none"
-            accept="image/*,application/pdf"
-            onChange={handleFile}
-            disabled={!cvReady || loading || saving}
-          />
-
-          {fileName && !loading && (
-            <div className="mt-3 badge bg-light text-dark border p-2 fw-normal">
-              <i className="bi bi-file-earmark-check me-1"></i>
-              {fileName}
-            </div>
-          )}
+      {error && (
+        <div className="alert alert-danger alert-dismissible fade show small" role="alert">
+          {error}
+          <button type="button" className="btn-close" onClick={() => setError(null)}></button>
         </div>
+      )}
+
+      <div
+        className={`mb-4 p-5 rounded-3 text-center border-2 ${dragActive ? "border-dark bg-light" : "border-secondary-subtle"}`}
+        onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+        onDragLeave={() => setDragActive(false)}
+        onDrop={(e) => { e.preventDefault(); setDragActive(false); processFile(e.dataTransfer.files[0]); }}
+        onClick={() => !saving && fileInputRef.current.click()}
+        style={{ cursor: "pointer", borderStyle: "dashed" }}
+      >
+        <h5 className="fw-bold mb-1">Upload Document</h5>
+        <input type="file" ref={fileInputRef} className="d-none" accept="image/*,application/pdf" onChange={(e) => processFile(e.target.files[0])} disabled={loading || saving} />
       </div>
 
       <canvas ref={originalCanvasRef} style={{ display: "none" }} />
       <canvas ref={scannedCanvasRef} style={{ display: "none" }} />
 
       {before && after && (
-        <div className="mt-3">
+        <>
           <button
-            className={`btn ${uploadSuccess ? "btn-success" : "btn-dark"} w-100 mb-4`}
+            className={`btn w-100 mb-4 ${uploadSuccess ? "btn-success" : error ? "btn-warning" : "btn-dark"}`}
             onClick={handleGalleryUpload}
             disabled={saving || uploadSuccess}
           >
-            {uploadSuccess ? "Files Saved ✓" : "Save Original + Processed"}
+            {saving ? "Saving..." : uploadSuccess ? "Saved ✓" : error ? "Retry Upload" : "Save to Gallery"}
           </button>
           <BeforeAfter before={before} after={after} />
-        </div>
+        </>
       )}
     </div>
   );
