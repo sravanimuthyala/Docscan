@@ -1,12 +1,28 @@
-# 📄 DocScan – CamScanner-Style Document Scanner (Full-Stack Intern Task)
+# DocScan – CamScanner-Style Document Scanner (Full-Stack Intern Task)
 
 DocScan is a full-stack web application that allows users to upload images or PDFs, automatically detects the document inside the image, applies perspective correction (CamScanner-style), and stores both original and processed scans securely per user.
 
-This project  focuses on **frontend computer vision**, **Firebase backend**, and **clean application architecture**.
 
 
+## Project Architecture 
 
+DocScan uses a **frontend-first architecture** where all document detection and perspective correction are performed in the browser using **OpenCV.js** and the **HTML Canvas API**.  
 
+The React frontend handles:
+- Authentication (Login/Register)
+- File upload (Image/PDF)
+- Canvas-based image processing
+- Before/After preview and Gallery UI
+
+Firebase is used as the backend for:
+- User authentication
+- Secure file storage (original & scanned images)
+- Metadata persistence (Firestore)
+- Application hosting
+
+Each user’s data is isolated using Firebase Authentication and security rules.
+
+This architecture avoids backend CV services, keeps costs low, and remains scalable and extensible.
 
 ### Data Flow (End-to-End)
 
@@ -23,7 +39,7 @@ This project  focuses on **frontend computer vision**, **Firebase backend**, and
 
 ---
 
-## 🧠 How Auto-Crop Works (Algorithm Steps)
+## How Auto-Crop Works (Algorithm Steps)
 
 The auto-crop and perspective correction logic is implemented **entirely on the frontend** using **OpenCV.js**.
 
@@ -65,10 +81,45 @@ The auto-crop and perspective correction logic is implemented **entirely on the 
    - Ensures rectangular
 
 
+##  Libraries Used 
+
+| Library | Purpose | 
+|------   |------   |
+| React   | Frontend UI framework | 
+| Vite    | Frontend build tool | 
+| OpenCV.js| Document detection & perspective correction | 
+| pdf.js | Convert PDF first page to image | 
+| Firebase SDK | Authentication, Firestore, Storage | 
+| Bootstrap | Responsive UI styling | 
 
 
+## Trade-Offs & Future Improvements
 
+### Trade-Offs Made
 
+- **Frontend-only computer vision**  
+  The document scanning pipeline runs entirely in the browser to avoid backend cost and complexity.  
+  *Trade-off:* Performance depends on the client device.
 
+- **Automatic detection without manual adjustment**  
+  Keeps the user experience simple and the implementation focused.  
+  *Trade-off:* Users cannot manually fix edge-detection failures.
 
+- **Single-page PDF processing**  
+  Only the first page of a PDF is processed to maintain responsiveness.  
+  *Trade-off:* Multi-page scanning is not supported yet.
+
+- **Heuristic-based edge detection**  
+  Uses classical computer-vision techniques instead of machine learning.  
+  *Trade-off:* Very low-contrast or extremely cluttered images may fail detection.
+
+### What I’d Improve Next
+
+- Manual corner adjustment UI before finalizing the scan  
+- Multi-page PDF scanning with page navigation   
+- Scan enhancement filters (black & white, sharpen, contrast)  
+- Batch uploads and processing queue  
+- Web Workers for OpenCV to improve UI responsiveness  
+
+---
 
