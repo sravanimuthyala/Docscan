@@ -30,7 +30,6 @@ export default function Login() {
 
   return (
     <div className="bg-body-tertiary min-vh-100 d-flex align-items-center justify-content-center position-relative">
-      {/* Smooth overlay loader */}
       {loading && (
         <div className="position-absolute top-0 start-0 w-100 h-100 d-flex flex-column justify-content-center align-items-center bg-dark bg-opacity-50" style={{ zIndex: 10 }}>
           <div className="spinner-border text-light mb-3" role="status"></div>
