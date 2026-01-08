@@ -60,7 +60,7 @@ export default function Register() {
         {error && <div className="alert alert-danger mt-3">{error}</div>}
         {success && <div className="alert alert-success mt-3">{success}</div>}
 
-        {/* ✅ Added paragraph with link */}
+        
         <p className="text-center mt-3">
           Already have an account?{" "}
           <Link to="/login" className="text-dark">
